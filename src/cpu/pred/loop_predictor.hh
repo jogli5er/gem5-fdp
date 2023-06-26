@@ -10,8 +10,8 @@
  * terms below provided that you ensure that this notice is replicated
  * unmodified and in its entirety in all distributions of the software,
  * modified or unmodified, in source code or in binary form.
- * Copyright (c) 2014 The University of Wisconsin
  *
+ * Copyright (c) 2014 The University of Wisconsin
  * Copyright (c) 2006 INRIA (Institut National de Recherche en
  * Informatique et en Automatique  / French National Research Institute
  * for Computer Science and Applied Mathematics)
