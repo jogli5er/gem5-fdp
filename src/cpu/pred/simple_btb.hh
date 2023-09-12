@@ -1,5 +1,4 @@
 /*
- * Copyright (c) 2011, 2014 ARM Limited
  * Copyright (c) 2022-2023 The University of Edinburgh
  * All rights reserved
  *
@@ -12,7 +11,7 @@
  * unmodified and in its entirety in all distributions of the software,
  * modified or unmodified, in source code or in binary form.
  *
- * Copyright (c) 2004-2006 The Regents of The University of Michigan
+ * Copyright (c) 2004-2005 The Regents of The University of Michigan
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,15 +38,13 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __CPU_PRED_2BIT_LOCAL_PRED_HH__
-#define __CPU_PRED_2BIT_LOCAL_PRED_HH__
+#ifndef __CPU_PRED_SIMPLE_BTB_HH__
+#define __CPU_PRED_SIMPLE_BTB_HH__
 
-#include <vector>
-
-#include "base/sat_counter.hh"
+#include "base/logging.hh"
 #include "base/types.hh"
-#include "cpu/pred/bpred_unit.hh"
-#include "params/LocalBP.hh"
+#include "cpu/pred/btb.hh"
+#include "params/SimpleBTB.hh"
 
 namespace gem5
 {
@@ -55,63 +52,76 @@ namespace gem5
 namespace branch_prediction
 {
 
-/**
- * Implements a local predictor that uses the PC to index into a table of
- * counters.  Note that any time a pointer to the bpHistory is given, it
- * should be NULL using this predictor because it does not have any branch
- * predictor state that needs to be recorded or updated; the update can be
- * determined solely by the branch being taken or not taken.
- */
-class LocalBP : public BPredUnit
+class SimpleBTB : public BranchTargetBuffer
 {
   public:
-    /**
-     * Default branch predictor constructor.
-     */
-    LocalBP(const LocalBPParams &params);
+    SimpleBTB(const SimpleBTBParams &params);
 
-    // Overriding interface functions
-    bool lookup(ThreadID tid, Addr pc, void * &bpHistory) override;
+    void memInvalidate() override;
+    const PCStateBase *lookup(ThreadID tid, Addr instPC,
+                           BranchType type = BranchType::NoBranch) override;
+    bool valid(ThreadID tid, Addr instPC,
+                           BranchType type = BranchType::NoBranch) override;
+    void update(ThreadID tid, Addr instPC, const PCStateBase &target_pc,
+                           BranchType type = BranchType::NoBranch,
+                           StaticInstPtr inst = nullptr) override;
 
-    void updateHistories(ThreadID tid, Addr pc, bool uncond, bool taken,
-                         Addr target,  void * &bpHistory) override;
-
-    void update(ThreadID tid, Addr pc, bool taken,
-                void * &bpHistory, bool squashed,
-                const StaticInstPtr &inst, Addr corrTarget) override;
-
-    void squash(ThreadID tid, void * &bpHistory) override
-    { assert(bpHistory == NULL); }
 
   private:
-    /**
-     *  Returns the taken/not taken prediction given the value of the
-     *  counter.
-     *  @param count The value of the counter.
-     *  @return The prediction based on the counter value.
+    struct BTBEntry
+    {
+        /** The entry's tag. */
+        Addr tag = 0;
+
+        /** The entry's target. */
+        std::unique_ptr<PCStateBase> target;
+
+        /** The entry's thread id. */
+        ThreadID tid;
+
+        /** Whether or not the entry is valid. */
+        bool valid = false;
+    };
+
+
+    /** Returns the index into the BTB, based on the branch's PC.
+     *  @param inst_PC The branch to look up.
+     *  @return Returns the index into the BTB.
      */
-    inline bool getPrediction(uint8_t &count);
+    inline unsigned getIndex(Addr instPC, ThreadID tid);
 
-    /** Calculates the local index based on the PC. */
-    inline unsigned getLocalIndex(Addr &PC);
+    /** Returns the tag bits of a given address.
+     *  @param inst_PC The branch's address.
+     *  @return Returns the tag bits.
+     */
+    inline Addr getTag(Addr instPC);
 
-    /** Size of the local predictor. */
-    const unsigned localPredictorSize;
+    /** The actual BTB. */
+    std::vector<BTBEntry> btb;
 
-    /** Number of bits of the local predictor's counters. */
-    const unsigned localCtrBits;
+    /** The number of entries in the BTB. */
+    unsigned numEntries;
 
-    /** Number of sets. */
-    const unsigned localPredictorSets;
+    /** The index mask. */
+    unsigned idxMask;
 
-    /** Array of counters that make up the local predictor. */
-    std::vector<SatCounter8> localCtrs;
+    /** The number of tag bits per entry. */
+    unsigned tagBits;
 
-    /** Mask to get index bits. */
-    const unsigned indexMask;
+    /** The tag mask. */
+    unsigned tagMask;
+
+    /** Number of bits to shift PC when calculating index. */
+    unsigned instShiftAmt;
+
+    /** Number of bits to shift PC when calculating tag. */
+    unsigned tagShiftAmt;
+
+    /** Log2 NumThreads used for hashing threadid */
+    unsigned log2NumThreads;
 };
 
 } // namespace branch_prediction
 } // namespace gem5
 
-#endif // __CPU_PRED_2BIT_LOCAL_PRED_HH__
+#endif // __CPU_PRED_SIMPLE_BTB_HH__
