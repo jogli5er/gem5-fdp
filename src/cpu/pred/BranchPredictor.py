@@ -42,6 +42,8 @@ from m5.params import *
 from m5.proxy import *
 
 from m5.objects.ClockedObject import ClockedObject
+from m5.objects.IndexingPolicies import *
+from m5.objects.ReplacementPolicies import *
 
 
 class BranchType(Enum):
@@ -73,6 +75,34 @@ class SimpleBTB(BranchTargetBuffer):
 
     numEntries = Param.Unsigned(4096, "Number of BTB entries")
     tagBits = Param.Unsigned(16, "Size of the BTB tags, in bits")
+    instShiftAmt = Param.Unsigned(
+        Parent.instShiftAmt, "Number of bits to shift instructions by"
+    )
+
+
+class AssociativeBTB(BranchTargetBuffer):
+    type = "AssociativeBTB"
+    cxx_class = "gem5::branch_prediction::AssociativeBTB"
+    cxx_header = "cpu/pred/associative_btb.hh"
+
+    numEntries = Param.MemorySize("4096", "Number of entries of BTB entries")
+    assoc = Param.Unsigned(8, "Associativity of the BTB")
+    indexing_policy = Param.BaseIndexingPolicy(
+        SetAssociative(
+            entry_size=1, assoc=Parent.assoc, size=Parent.numEntries
+        ),
+        "Indexing policy of the BTB",
+    )
+    replacement_policy = Param.BaseReplacementPolicy(
+        LRURP(), "Replacement policy of the table"
+    )
+
+    tagBits = Param.Unsigned(16, "Size of the BTB tags, in bits")
+    useTagCompression = Param.Bool(
+        False,
+        "Use a tag compression function as"
+        "described in https://ieeexplore.ieee.org/document/9528930",
+    )
     instShiftAmt = Param.Unsigned(
         Parent.instShiftAmt, "Number of bits to shift instructions by"
     )
