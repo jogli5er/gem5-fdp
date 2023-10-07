@@ -38,7 +38,13 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef __CPU_PRED_SIMPLE_BTB_HH__
+#define __CPU_PRED_SIMPLE_BTB_HH__
+
+#include "base/logging.hh"
+#include "base/types.hh"
 #include "cpu/pred/btb.hh"
+#include "params/SimpleBTB.hh"
 
 namespace gem5
 {
@@ -46,68 +52,79 @@ namespace gem5
 namespace branch_prediction
 {
 
-BranchTargetBuffer::BranchTargetBuffer(const Params &params)
-    : ClockedObject(params),
-      numThreads(params.numThreads),
-      stats(this)
+class SimpleBTB : public BranchTargetBuffer
 {
-}
+  public:
+    SimpleBTB(const SimpleBTBParams &params);
 
-const StaticInstPtr
-BranchTargetBuffer::lookupInst(ThreadID tid, Addr instPC)
-{
-    panic("Not implemented for this BTB");
-    return nullptr;
-}
+    void memInvalidate() override;
+    const PCStateBase *lookup(ThreadID tid, Addr instPC,
+                           BranchType type = BranchType::NoBranch) override;
+    bool valid(ThreadID tid, Addr instPC) override;
+    void update(ThreadID tid, Addr instPC, const PCStateBase &target_pc,
+                           BranchType type = BranchType::NoBranch,
+                           StaticInstPtr inst = nullptr) override;
+    const StaticInstPtr lookupInst(ThreadID tid, Addr instPC) override;
 
-bool
-BranchTargetBuffer::valid(ThreadID tid, Addr instPC)
-{
-    panic("Not implemented for this BTB");
-    return false;
-}
 
-BranchTargetBuffer::BranchTargetBufferStats::BranchTargetBufferStats(
-                                                statistics::Group *parent)
-    : statistics::Group(parent),
-      ADD_STAT(lookups, statistics::units::Count::get(),
-               "Number of BTB lookups"),
-      ADD_STAT(misses, statistics::units::Count::get(),
-               "Number of BTB misses"),
-      ADD_STAT(updates, statistics::units::Count::get(),
-               "Number of BTB updates"),
-      ADD_STAT(mispredict, statistics::units::Count::get(),
-               "Number of BTB mispredictions. "
-               "No target found or target wrong."),
-      ADD_STAT(evictions, statistics::units::Count::get(),
-               "Number of BTB evictions")
-{
-    using namespace statistics;
-    lookups
-        .init(enums::Num_BranchType)
-        .flags(total | pdf);
+  private:
+    struct BTBEntry
+    {
+        /** The entry's tag. */
+        Addr tag = 0;
 
-    misses
-        .init(enums::Num_BranchType)
-        .flags(total | pdf);
+        /** The entry's target. */
+        std::unique_ptr<PCStateBase> target;
 
-    updates
-        .init(enums::Num_BranchType)
-        .flags(total | pdf);
+        /** The entry's thread id. */
+        ThreadID tid;
 
-    mispredict
-        .init(enums::Num_BranchType)
-        .flags(total | pdf);
+        /** Whether or not the entry is valid. */
+        bool valid = false;
 
-    evictions.flags(nozero);
+        /** Pointer to the static branch instruction at this address */
+        StaticInstPtr inst = nullptr;
+    };
 
-    for (int i = 0; i < enums::Num_BranchType; i++) {
-        lookups.subname(i, enums::BranchTypeStrings[i]);
-        misses.subname(i, enums::BranchTypeStrings[i]);
-        updates.subname(i, enums::BranchTypeStrings[i]);
-        mispredict.subname(i, enums::BranchTypeStrings[i]);
-    }
-}
+
+    /** Returns the index into the BTB, based on the branch's PC.
+     *  @param inst_PC The branch to look up.
+     *  @return Returns the index into the BTB.
+     */
+    inline unsigned getIndex(Addr instPC, ThreadID tid);
+
+    /** Returns the tag bits of a given address.
+     *  @param inst_PC The branch's address.
+     *  @return Returns the tag bits.
+     */
+    inline Addr getTag(Addr instPC);
+
+    /** The actual BTB. */
+    std::vector<BTBEntry> btb;
+
+    /** The number of entries in the BTB. */
+    unsigned numEntries;
+
+    /** The index mask. */
+    unsigned idxMask;
+
+    /** The number of tag bits per entry. */
+    unsigned tagBits;
+
+    /** The tag mask. */
+    unsigned tagMask;
+
+    /** Number of bits to shift PC when calculating index. */
+    unsigned instShiftAmt;
+
+    /** Number of bits to shift PC when calculating tag. */
+    unsigned tagShiftAmt;
+
+    /** Log2 NumThreads used for hashing threadid */
+    unsigned log2NumThreads;
+};
 
 } // namespace branch_prediction
 } // namespace gem5
+
+#endif // __CPU_PRED_SIMPLE_BTB_HH__
