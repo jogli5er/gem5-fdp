@@ -66,6 +66,7 @@ TAGEBase::TAGEBase(const TAGEBaseParams &p)
      numUseAltOnNa(p.numUseAltOnNa),
      useAltOnNaBits(p.useAltOnNaBits),
      maxNumAlloc(p.maxNumAlloc),
+     takenOnlyHistory(p.takenOnlyHistory),
      noSkip(p.noSkip),
      speculativeHistUpdate(p.speculativeHistUpdate),
      instShiftAmt(p.instShiftAmt),
@@ -629,12 +630,22 @@ TAGEBase::updateHistories(ThreadID tid, Addr branch_pc, bool speculative,
     // for this branch
     assert(bi->nGhist == 0);
 
+    if (takenOnlyHistory) {
+        // For taken history we shift two bits into the global
+        // history in case the branch was taken.
+        // For not-taken branches no history update will happen.
+        if (taken) {
+            bi->ghist = (((branch_pc >> instShiftAmt) >> 2)
+                      ^  ((target >> instShiftAmt) >> 3)) & 0x3;
+            bi->nGhist = 2;
+        }
 
+    } else {
         // For normal direction history update the history by
         // whether the branch was taken or not.
         bi->ghist = taken ? 1 : 0;
         bi->nGhist = 1;
-
+    }
     // Update the global history
     updateGHist(tid, bi->ghist, bi->nGhist);
 
@@ -657,7 +668,7 @@ TAGEBase::recordHistState(ThreadID tid, BranchInfo* bi)
         bi->ct0[i] = tHist.computeTags[0][i].comp;
         bi->ct1[i] = tHist.computeTags[1][i].comp;
     }
-    }
+}
 
 void
 TAGEBase::restoreHistState(ThreadID tid, BranchInfo* bi)
