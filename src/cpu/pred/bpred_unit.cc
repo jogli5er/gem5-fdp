@@ -93,6 +93,12 @@ BPredUnit::drainSanityCheck() const
         assert(ph.empty());
 }
 
+void
+BPredUnit::branchPlaceholder(ThreadID tid, Addr pc,
+                             bool uncond, void * &bp_history)
+{
+    panic("Not implemented for this BP!\n");
+}
 
 bool
 BPredUnit::predict(const StaticInstPtr &inst, const InstSeqNum &seqNum,
@@ -392,8 +398,6 @@ BPredUnit::squash(const InstSeqNum &squashed_sn, ThreadID tid)
                 "sn:%llu, PC:%#x\n", tid, squashed_sn, hist->seqNum,
                 hist->pc);
 
-
-        delete predHist[tid].front();
         predHist[tid].pop_front();
 
         DPRINTF(Branch, "[tid:%i] [squash sn:%llu] pred_hist.size(): %i\n",
@@ -430,6 +434,8 @@ BPredUnit::squashHistory(ThreadID tid, PredictorHistory* &history)
 
     // This call should delete the bpHistory.
     squash(tid, history->bpHistory);
+    delete history;
+    history = nullptr;
 }
 
 
