@@ -407,11 +407,11 @@ BPredUnit::squash(const InstSeqNum &squashed_sn, ThreadID tid)
 
         auto hist = predHist[tid].front();
 
-        squashHistory(tid, hist);
-
         DPRINTF(Branch, "[tid:%i, squash sn:%llu] Removing history for "
                 "sn:%llu, PC:%#x\n", tid, squashed_sn, hist->seqNum,
                 hist->pc);
+
+        squashHistory(tid, hist);
 
         predHist[tid].pop_front();
 
