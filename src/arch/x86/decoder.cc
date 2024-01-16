@@ -738,9 +738,12 @@ Decoder::decode(PCStateBase &next_pc)
 }
 
 StaticInstPtr
-Decoder::fetchRomMicroop(MicroPC micropc, StaticInstPtr curMacroop)
+Decoder::fetchRomMicroop(PCStateBase &pc, StaticInstPtr curMacroop)
 {
-    return microcodeRom.fetchMicroop(micropc, curMacroop);
+    auto si = microcodeRom.fetchMicroop(pc.microPC(), curMacroop);
+    auto p = pc.as<PCState>();
+    si->size(p.npc() - p.pc());
+    return si;
 }
 
 } // namespace X86ISA

@@ -33,7 +33,7 @@ namespace gem5
 {
 
 StaticInstPtr
-InstDecoder::fetchRomMicroop(MicroPC micropc, StaticInstPtr curMacroop)
+InstDecoder::fetchRomMicroop(PCStateBase &pc, StaticInstPtr curMacroop)
 {
     panic("ROM based microcode isn't implemented.");
 }

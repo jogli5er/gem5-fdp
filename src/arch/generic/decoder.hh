@@ -58,7 +58,7 @@ class InstDecoder : public SimObject
     {}
 
     virtual StaticInstPtr fetchRomMicroop(
-            MicroPC micropc, StaticInstPtr curMacroop);
+            PCStateBase &pc, StaticInstPtr curMacroop);
     virtual void
     reset()
     {

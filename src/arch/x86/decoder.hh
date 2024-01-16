@@ -355,7 +355,7 @@ class Decoder : public InstDecoder
     StaticInstPtr decode(PCStateBase &next_pc) override;
 
     StaticInstPtr fetchRomMicroop(
-            MicroPC micropc, StaticInstPtr curMacroop) override;
+            PCStateBase &pc, StaticInstPtr curMacroop) override;
 };
 
 } // namespace X86ISA

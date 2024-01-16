@@ -343,7 +343,7 @@ BaseSimpleCPU::preExecute()
     if (isRomMicroPC(pc_state.microPC())) {
         t_info.stayAtPC = false;
         curStaticInst = decoder->fetchRomMicroop(
-                pc_state.microPC(), curMacroStaticInst);
+                pc_state, curMacroStaticInst);
     } else if (!curMacroStaticInst) {
         //We're not in the middle of a macro instruction
         StaticInstPtr instPtr = NULL;

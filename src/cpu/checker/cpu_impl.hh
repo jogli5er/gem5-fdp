@@ -282,7 +282,7 @@ Checker<DynInstPtr>::verify(const DynInstPtr &completed_inst)
                 if (isRomMicroPC(pc_state->microPC())) {
                     fetchDone = true;
                     curStaticInst = decoder->fetchRomMicroop(
-                            pc_state->microPC(), nullptr);
+                                                    *pc_state, nullptr);
                 } else if (!curMacroStaticInst) {
                     //We're not in the middle of a macro instruction
                     StaticInstPtr instPtr = nullptr;

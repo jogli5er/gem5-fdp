@@ -1256,7 +1256,7 @@ Fetch::fetch(bool &status_change)
             if (curMacroop || inRom) {
                 if (inRom) {
                     staticInst = dec_ptr->fetchRomMicroop(
-                            this_pc.microPC(), curMacroop);
+                                                        this_pc, curMacroop);
                 } else {
                     staticInst = curMacroop->fetchMicroop(this_pc.microPC());
                 }
