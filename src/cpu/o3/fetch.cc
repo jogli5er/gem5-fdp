@@ -83,6 +83,7 @@ Fetch::IcachePort::IcachePort(Fetch *_fetch, CPU *_cpu) :
 
 Fetch::Fetch(CPU *_cpu, const BaseO3CPUParams &params)
     : fetchPolicy(params.smtFetchPolicy),
+      outstandingPrefetches(0), maxOutstandingPrefetches(4),
       cpu(_cpu),
       bac(nullptr), ftq(nullptr),
       decoupledFrontEnd(params.decoupledFrontEnd),
@@ -198,7 +199,41 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
              "Number of instructions fetched each cycle (Total)"),
     ADD_STAT(idleRate, statistics::units::Ratio::get(),
              "Ratio of cycles fetch was idle",
-             idleCycles / cpu->baseStats.numCycles)
+             idleCycles / cpu->baseStats.numCycles),
+
+    ADD_STAT(ftReadyToFetch, statistics::units::Count::get(),
+             "Number of times a fetch target is ready to fetch"),
+    ADD_STAT(ftPrefetchInProgress, statistics::units::Count::get(),
+             "Number of times a fetch targets has an outstanding prefetch"),
+    ADD_STAT(ftTranslationInProgress, statistics::units::Count::get(),
+            "Number of times a fetch targets has an outstanding translation"),
+    ADD_STAT(ftTranslationReady, statistics::units::Count::get(),
+            "Number of times a fetch targets translation is ready"),
+    ADD_STAT(ftTranslationFailed, statistics::units::Count::get(),
+            "Number of times a fetch targets translation failed"),
+    ADD_STAT(crossFetchTarget, statistics::units::Count::get(),
+            "Number of times an instruction crosses a fetch target boundary"),
+    ADD_STAT(crossFetchTargetNotNext, statistics::units::Count::get(),
+            "Number of times an instruction exceed fetch target boundary"
+            " but its not the next fetch target in the FTQ. (x86 branch)"),
+    ADD_STAT(demandHit, statistics::units::Count::get(),
+            "Number of times demand fetch hits in the icache"),
+    ADD_STAT(demandMiss, statistics::units::Count::get(),
+            "Number of times demand fetch misses in the icache"),
+    ADD_STAT(pfIssued, statistics::units::Count::get(),
+            "Number of times a prefetch was sent to the cache"),
+    ADD_STAT(pfReceived, statistics::units::Count::get(),
+            "Number of times a prefetch was received before fetch needs it"),
+    ADD_STAT(pfLate, statistics::units::Count::get(),
+            "Number of times a prefetch was late and blocked fetch"),
+    ADD_STAT(pfInCache, statistics::units::Count::get(),
+            "Number of times a prefetch was already in the cache"),
+    ADD_STAT(pfSquashed, statistics::units::Count::get(),
+            "Number of times a packet was dropped due to squash. "),
+    ADD_STAT(pfAccuracy, statistics::units::Count::get(),
+            "The prefetch accuracy"),
+    ADD_STAT(pfCoverage, statistics::units::Count::get(),
+            "The prefetch coverage")
 {
         predictedBranches
             .prereq(predictedBranches);
@@ -239,6 +274,9 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
             .flags(statistics::pdf);
         idleRate
             .prereq(idleRate);
+
+        pfAccuracy = (pfIssued - pfSquashed) / pfIssued;
+        pfCoverage = demandHit / (demandHit + demandMiss);
 }
 void
 Fetch::setTimeBuffer(TimeBuffer<TimeStruct> *time_buffer)
@@ -347,17 +385,25 @@ Fetch::processCacheCompletion(PacketPtr pkt)
 {
     ThreadID tid = cpu->contextToThread(pkt->req->contextId());
 
-    DPRINTF(Fetch, "[tid:%i] Waking up from cache miss.\n", tid);
-    assert(!cpu->switchedOut());
-
     // Only change the status if it's still waiting on the icache access
     // to return.
     if (fetchStatus[tid] != IcacheWaitResponse ||
         pkt->req != memReq[tid]) {
+
+        if (isPrefetch(tid, pkt)) {
+            // If the request belongs to a fetch target, we are done
+            return;
+        }
+
         ++fetchStats.icacheSquashes;
         delete pkt;
         return;
     }
+
+
+    DPRINTF(Fetch, "[tid:%i] Recv.: %#x. Waking up from cache miss.\n", tid,
+            pkt->req->getPaddr());
+    assert(!cpu->switchedOut());
 
     memcpy(fetchBuffer[tid], pkt->getConstPtr<uint8_t>(), fetchBufferSize);
     fetchBufferValid[tid] = true;
@@ -376,6 +422,12 @@ Fetch::processCacheCompletion(PacketPtr pkt)
         fetchStatus[tid] = Blocked;
     } else {
         fetchStatus[tid] = IcacheAccessComplete;
+    }
+
+    if (pkt->req->getAccessDepth() == 0) {
+        fetchStats.demandHit++;
+    } else {
+        fetchStats.demandMiss++;
     }
 
     pkt->req->setAccessLatency();
@@ -515,7 +567,7 @@ Fetch::ftqReady(ThreadID tid, bool &status_change)
 
 
 bool
-Fetch::fetchCacheLine(Addr vaddr, ThreadID tid, Addr pc)
+Fetch::fetchCacheLine(Addr vaddr, ThreadID tid, Addr pc, FetchTargetPtr ft)
 {
     Fault fault = NoFault;
 
@@ -540,31 +592,418 @@ Fetch::fetchCacheLine(Addr vaddr, ThreadID tid, Addr pc)
     // Align the fetch address to the start of a fetch buffer segment.
     Addr fetchBufferBlockPC = fetchBufferAlignPC(vaddr);
 
-    DPRINTF(Fetch, "[tid:%i] Fetching cache line %#x for addr %#x\n",
-            tid, fetchBufferBlockPC, vaddr);
+    DPRINTF(Fetch, "[tid:%i] Fetching cache line %#x for PC:%#x, Addr:%#x\n",
+            tid, fetchBufferBlockPC, pc, vaddr);
 
-    // Setup the memReq to do a read of the first instruction's address.
-    // Set the appropriate read size and flags as well.
-    // Build request here.
-    RequestPtr mem_req = std::make_shared<Request>(
-        fetchBufferBlockPC, fetchBufferSize,
-        Request::INST_FETCH, cpu->instRequestorId(), pc,
-        cpu->thread[tid]->contextId());
+    if (decoupledFrontEnd) {
 
-    mem_req->taskId(cpu->taskId());
+        // Read the head fetch target in the FTQ. In theory we only need to
+        // read the head. However, for x86 an instruction can span two
+        // fetch targets. The PC still points to the fetch target at the head
+        // of the FTQ but we need to read a few more bytes from the second
+        // fetch target to fully decode the instruction.
 
-    memReq[tid] = mem_req;
+        Addr cacheBlock = cacheBlockAligned(vaddr);
 
-    // Initiate translation of the icache block
-    fetchStatus[tid] = ItlbWait;
-    FetchTranslation *trans = new FetchTranslation(this);
-    cpu->mmu->translateTiming(mem_req, cpu->thread[tid]->getTC(),
-                              trans, BaseMMU::Execute);
+        ft = ftq->readHead(tid);
+        DPRINTF(Fetch, "Chk %s for %#x\n", ft->print(), cacheBlock);
+
+        assert(ft);
+        if (ft->getBlkAddr() != cacheBlock) {
+            // If the head of the FTQ is not the right one, check the next
+            // fetch target.
+            fetchStats.crossFetchTarget++;
+            ft = ftq->readNextHead(tid);
+            DPRINTF(Fetch, "Chk %s for %#x\n", ft->print(), cacheBlock);
+
+            if (ft && ft->getBlkAddr() != cacheBlock) {
+                ft = nullptr;
+                fetchStats.crossFetchTargetNotNext++;
+            }
+        }
+
+
+        // if (ft == nullptr) {
+        //     int i = 0;
+        //     ft = ftq->findNext(tid,
+        //         [this, vaddr, &i](FetchTargetPtr &ft) -> bool
+        //         {
+        //             i++;
+        //             DPRINTF(Fetch, "Chk %s for %#x\n", ft->print(), vaddr);
+        //             return ft->inRangeAligned(vaddr, fetchBufferSize);
+        //         });
+        //     assert((i<=2) && ft);
+        // }
+
+    }
+
+    if (ft) {
+
+        bool done = false;
+        switch(ft->state) {
+
+            case FetchTarget::ReadyToFetch:
+                // If the fetch target is ready to fetch, we can initiate the
+                // cache access right away. Translation is already done. And
+                // the block was prefetched into the I-cache.
+                DPRINTF(Fetch, "[tid:%i] Ready to fetch: %s\n",
+                        tid, ft->print());
+                fetchStats.ftReadyToFetch++;
+                break;
+
+
+            case FetchTarget::PrefetchInProgress:
+                // If the prefetch is still in progress, we wait for it's
+                // response. The prefetch will become the actual demand
+                // request.
+                DPRINTF(Fetch, "[tid:%i] Prefetch in progress: %s\n",
+                        tid, ft->print());
+                fetchStats.ftPrefetchInProgress++;
+                fetchStats.pfLate++;
+
+                // Prefetch will become the demand request.
+                outstandingPrefetches--;
+                lastIcacheStall[tid] = curTick();
+                fetchStatus[tid] = IcacheWaitResponse;
+                fetchBufferPC[tid] = fetchBufferBlockPC;
+                fetchBufferValid[tid] = false;
+                memReq[tid] = ft->popReq();
+                ft->markReady();
+
+                // Notify Fetch Request probe when the packet becomes a
+                // demand request.
+                ppFetchRequestSent->notify(memReq[tid]);
+                done = true;
+                break;
+
+
+
+        // At this point we know the prefetch was not issued yet.
+        // Next remaining states check the translation state.
+
+
+            case FetchTarget::TranslationInProgress:
+                // If the fetch target translation is in progress,
+                // we need to wait for it to complete.
+                DPRINTF(Fetch, "[tid:%i] Translation in progress: %s\n",
+                        tid, ft->print());
+                fetchStats.ftTranslationInProgress++;
+
+                fetchStatus[tid] = ItlbWait;
+                memReq[tid] = ft->popReq();
+                ft->markReady();
+                done = true;
+                break;
+
+
+            case FetchTarget::TranslationFailed:
+                // If the fetch target translation failed, we need
+                // to pop the fault and execute the trap handler.
+                DPRINTF(Fetch, "[tid:%i] Translation failed: %s\n",
+                        tid, ft->print());
+                fetchStats.ftTranslationFailed++;
+                processTrap(tid, ft->fault, ft->req);
+                done = true;
+                break;
+
+
+            case FetchTarget::TranslationReady:
+                // If the fetch target translation is ready, we can
+                // initiate the cache access right away. Since the request
+                // was not used for prefetching we can use it directly.
+                DPRINTF(Fetch, "[tid:%i] Translation ready: %s\n",
+                        tid, ft->print());
+                fetchStats.ftTranslationReady++;
+                break;
+
+            default:
+                assert(ft->initial());
+        }
+
+        if (done) {
+            return true;
+        }
+    }
+
+    // Create a new request for the fetch buffer block.
+    memReq[tid] = makeRequest(fetchBufferBlockPC, tid, pc, ft);
+
+    // If the request has already a valid physical address, we can
+    // skip translation and initiate the cache access right away.
+    if (memReq[tid]->hasPaddr()) {
+        performCacheAccess(fetchBufferBlockPC, tid, memReq[tid]);
+    } else {
+        // Initiate translation of the icache block
+        fetchStatus[tid] = ItlbWait;
+        startTranslation(memReq[tid], tid, ft);
+    }
+
     return true;
 }
 
 void
-Fetch::finishTranslation(const Fault &fault, const RequestPtr &mem_req)
+Fetch::startTranslation(const RequestPtr &mem_req, const ThreadID tid,
+                        const FetchTargetPtr &ft)
+{
+    if (ft) ft->startTranslation(mem_req);
+
+    FetchTranslation *trans = new FetchTranslation(this, ft);
+    cpu->mmu->translateTiming(mem_req, cpu->thread[tid]->getTC(),
+                              trans, BaseMMU::Execute);
+}
+
+RequestPtr
+Fetch::makeRequest(Addr vaddr, ThreadID tid, Addr pc, FetchTargetPtr ft)
+{
+    RequestPtr req = nullptr;
+
+    // First check if we can reuse the request from the fetch target.
+    if (ft && ft->req && ft->req->getVaddr() == vaddr) {
+        req = ft->popReq();
+        DPRINTF(Fetch, "[tid:%i] Reusing request for %#x from %s\n",
+                tid, vaddr, ft->print());
+    }
+
+    // Setup the memReq to do a read of the first instruction's address.
+    // Set the appropriate read size and flags as well.
+    // Build request here.
+    if (!req) {
+        req = std::make_shared<Request>(
+            vaddr, fetchBufferSize,
+            Request::INST_FETCH, cpu->instRequestorId(), pc,
+            cpu->thread[tid]->contextId());
+
+        req->taskId(cpu->taskId());
+    }
+
+    if (ft && ft->hasPaddr()
+           && ft->getBlkAddr() == cacheBlockAligned(vaddr)) {
+
+        // Get the physical address from the fetch target.
+        // Note that the fetch target covers a whole cache block.
+        // Take only cache block address and add the fetch
+        // buffer offset.
+        // Problem: in x86 an instruction can cross a cache line
+        // boundary. The PC start might still be this fetch target
+        // but we need to fetch the next cache line in order to
+        // decode the full instruction. We handle this by
+        // checking the fetch target range and do the translation
+        // again.
+
+        Addr cl_pa = ft->getPaddr() & ~(cacheBlkSize - 1);
+        cl_pa += vaddr & (cacheBlkSize - 1);
+
+        req->setPaddr(cl_pa);
+        DPRINTF(Fetch, "[tid:%i] Using translation VA:%#x, PA:%#x from %s\n",
+                tid, vaddr, cl_pa, ft->print());
+    }
+    return req;
+}
+
+
+bool
+Fetch::performCacheAccess(Addr vaddr, ThreadID tid, const RequestPtr &mem_req,
+                          bool prefetch)
+{
+    // Check that we're not going off into random memory
+    // If we have, just wait around for commit to squash something and put
+    // us on the right track
+    if (!cpu->system->isMemAddr(mem_req->getPaddr())) {
+        warn("Address %#x is outside of physical memory, stopping fetch\n",
+                mem_req->getPaddr());
+        fetchStatus[tid] = NoGoodAddr;
+        memReq[tid] = NULL;
+        return false;
+    }
+
+    // Build packet here.
+    PacketPtr data_pkt = new Packet(mem_req, MemCmd::ReadReq);
+    data_pkt->dataDynamic(new uint8_t[fetchBufferSize]);
+
+    if (!prefetch) {
+        fetchBufferPC[tid] = vaddr;
+        fetchBufferValid[tid] = false;
+        DPRINTF(Fetch, "Fetch: Doing instruction read. VA:%#lx, PA:%#lx\n",
+                vaddr, mem_req->getPaddr());
+        assert(vaddr == mem_req->getVaddr());
+
+        fetchStats.cacheLines++;
+    }
+
+
+    // Access the cache.
+    if (!icachePort.sendTimingReq(data_pkt)) {
+        assert(retryPkt == NULL);
+        assert(retryTid == InvalidThreadID);
+        DPRINTF(Fetch, "[tid:%i] Out of MSHRs!\n", tid);
+
+        if (prefetch) {
+            // If we're doing a prefetch, we can just drop the packet
+            // and not worry about it.
+            delete data_pkt;
+        } else {
+            // Otherwise, we need to save the packet and try again later.
+            fetchStatus[tid] = IcacheWaitRetry;
+            retryPkt = data_pkt;
+            retryTid = tid;
+            cacheBlocked = true;
+        }
+        return false;
+    }
+
+    // Successful send
+    if (!prefetch) {
+        DPRINTF(Fetch, "[tid:%i] Doing demand Icache access.\n", tid);
+        DPRINTF(Activity, "[tid:%i] Activity: Waiting on I-cache "
+                "response.\n", tid);
+
+        // Demand access blocks the CPU until the response returns.
+        lastIcacheStall[tid] = curTick();
+        fetchStatus[tid] = IcacheWaitResponse;
+
+        // Notify Fetch Request probe when a packet containing a fetch
+        // request is successfully sent
+        ppFetchRequestSent->notify(mem_req);
+    }
+    return true;
+}
+
+
+void
+Fetch::processFTQ(const ThreadID tid)
+{
+    // To prefetch there must be at least one other fetch target apart
+    // from the head FT in the FTQ.
+    if (ftq->size(tid) < 2) return;
+    if (!ftq->isValid(tid)) return;
+
+    FetchTargetPtr ft = nullptr;
+    // Translation ----------------------------------------
+    // First check if the FTQ contains fetch targets that
+    // require a translation.
+    ft = ftq->findAfterHead(tid,
+        [this](FetchTargetPtr &ft) -> bool
+        {
+            return ft->requiresTranslation();
+        });
+
+    if (ft != nullptr) {
+        // Send translation request to the MMU.
+        Addr fetchBufferBlockPC = fetchBufferAlignPC(ft->startAddress());
+        auto req = makeRequest(fetchBufferBlockPC, tid, ft->startAddress());
+
+        DPRINTF(Fetch, "[tid:%i] Translation for %#x started %s\n",
+                tid, fetchBufferBlockPC, ft->print());
+
+        startTranslation(req, tid, ft);
+    }
+
+
+    // Prefetch -------------------------------------------
+    if ((retryPkt != NULL) || cacheBlocked) {
+        // If there are packets in the retry queue, we can't issue
+        // prefetches.
+        DPRINTF(Fetch, "[tid:%i] Can't issue prefetches, out of MSHRs\n",
+                tid);
+        return;
+    }
+
+    if (outstandingPrefetches >= maxOutstandingPrefetches) {
+        // If we have too many outstanding prefetches, we can't issue
+        // more.
+        DPRINTF(Fetch, "[tid:%i] Can't issue prefetches, too many "
+                "outstanding\n", tid);
+        return;
+    }
+
+    // The front-end is able to prefetch. Search for the next fetch target
+    // that can be prefetched.
+    ft = ftq->findAfterHead(tid,
+        [this](FetchTargetPtr &ft) -> bool
+        {
+            return ft->translationReady();
+        });
+
+    if (ft != nullptr) {
+        // Send prefetch request to the cache.
+        RequestPtr req = ft->req;
+        assert(req != nullptr);
+
+        if (performCacheAccess(req->getVaddr(), tid, req, true)) {
+            ft->prefetchIssued();
+            outstandingPrefetches++;
+            fetchStats.pfIssued++;
+
+            DPRINTF(Fetch, "[tid:%i] Prefetch request send %#x (%i/%i) %s\n",
+                tid, req->getVaddr(),
+                outstandingPrefetches, maxOutstandingPrefetches,
+                ft->print());
+        }
+    }
+}
+
+
+
+bool
+Fetch::isPrefetchTranslation(const ThreadID tid, const Fault &fault,
+                             const RequestPtr &mem_req)
+{
+    if (!decoupledFrontEnd) return false;
+
+    // Iterate over all fetch targets in the FTQ and check if the
+    // request belongs to one of them.
+    FetchTargetPtr ft = ftq->findAfterHead(tid,
+        [this, mem_req](FetchTargetPtr &ft) -> bool
+        {
+            return ft->req == mem_req;
+        });
+
+    // If no fetch target was found, return false.
+    if (ft == nullptr) return false;
+
+
+    DPRINTF(Fetch, "[tid:%i] Translation for %#x completed %s\n",
+            tid, mem_req->getVaddr(), ft->print());
+
+    ft->finishTranslation(fault, mem_req, true);
+    return true;
+}
+
+bool
+Fetch::isPrefetch(const ThreadID tid, PacketPtr pkt)
+{
+    if (!decoupledFrontEnd) return false;
+
+    // Iterate over all fetch targets in the FTQ and check if the
+    // request belongs to one of them.
+    FetchTargetPtr ft = ftq->findAfterHead(tid,
+        [this, pkt](FetchTargetPtr &ft) -> bool
+        {
+            return ft->req == pkt->req;
+        });
+
+    // If no fetch target was found, return.
+    if (ft == nullptr) return false;
+
+    DPRINTF(Fetch, "[tid:%i] Prefetch for %#x completed %s\n",
+            tid, pkt->req->getVaddr(), ft->print());
+
+    // All (translation and prefetch) done for this fetch target.
+    // Delete the request and the packet.
+    ft->markReady();
+    outstandingPrefetches--;
+    fetchStats.pfReceived++;
+    if (pkt->req->getAccessDepth() == 0) {
+        fetchStats.pfInCache++;
+    }
+    delete pkt;
+    return true;
+}
+
+
+void
+Fetch::finishTranslation(const Fault &fault, const RequestPtr &mem_req,
+                         const FetchTargetPtr &ft)
 {
     ThreadID tid = cpu->contextToThread(mem_req->contextId());
     Addr fetchBufferBlockPC = mem_req->getVaddr();
@@ -576,56 +1015,36 @@ Fetch::finishTranslation(const Fault &fault, const RequestPtr &mem_req)
 
     if (fetchStatus[tid] != ItlbWait || mem_req != memReq[tid] ||
         mem_req->getVaddr() != memReq[tid]->getVaddr()) {
-        DPRINTF(Fetch, "[tid:%i] Ignoring itlb completed after squash\n",
-                tid);
-        ++fetchStats.tlbSquashes;
+
+
+        if (ft && ft->isValid()) {
+            DPRINTF(Fetch, "[tid:%i] Translation for %#x completed %s\n",
+                    tid, mem_req->getVaddr(), ft->print());
+
+            ft->finishTranslation(fault, mem_req, true);
+        } else {
+
+            // The request is neither for the head nor for a fetch target.
+            DPRINTF(Fetch, "[tid:%i] Ignoring itlb completed after squash\n",
+                    tid);
+            ++fetchStats.tlbSquashes;
+        }
+
+        // In either we case we are done here.
         return;
+    }
+
+    if (ft && ft->isValid()) {
+        DPRINTF(Fetch, "[tid:%i] Translation for %#x completed %s\n",
+                tid, mem_req->getVaddr(), ft->print());
+
+        ft->finishTranslation(fault, mem_req, false);
     }
 
 
     // If translation was successful, attempt to read the icache block.
     if (fault == NoFault) {
-        // Check that we're not going off into random memory
-        // If we have, just wait around for commit to squash something and put
-        // us on the right track
-        if (!cpu->system->isMemAddr(mem_req->getPaddr())) {
-            warn("Address %#x is outside of physical memory, stopping fetch\n",
-                    mem_req->getPaddr());
-            fetchStatus[tid] = NoGoodAddr;
-            memReq[tid] = NULL;
-            return;
-        }
-
-        // Build packet here.
-        PacketPtr data_pkt = new Packet(mem_req, MemCmd::ReadReq);
-        data_pkt->dataDynamic(new uint8_t[fetchBufferSize]);
-
-        fetchBufferPC[tid] = fetchBufferBlockPC;
-        fetchBufferValid[tid] = false;
-        DPRINTF(Fetch, "Fetch: Doing instruction read.\n");
-
-        fetchStats.cacheLines++;
-
-        // Access the cache.
-        if (!icachePort.sendTimingReq(data_pkt)) {
-            assert(retryPkt == NULL);
-            assert(retryTid == InvalidThreadID);
-            DPRINTF(Fetch, "[tid:%i] Out of MSHRs!\n", tid);
-
-            fetchStatus[tid] = IcacheWaitRetry;
-            retryPkt = data_pkt;
-            retryTid = tid;
-            cacheBlocked = true;
-        } else {
-            DPRINTF(Fetch, "[tid:%i] Doing Icache access.\n", tid);
-            DPRINTF(Activity, "[tid:%i] Activity: Waiting on I-cache "
-                    "response.\n", tid);
-            lastIcacheStall[tid] = curTick();
-            fetchStatus[tid] = IcacheWaitResponse;
-            // Notify Fetch Request probe when a packet containing a fetch
-            // request is successfully sent
-            ppFetchRequestSent->notify(mem_req);
-        }
+        performCacheAccess(fetchBufferBlockPC, tid, mem_req);
     } else {
         // Don't send an instruction to decode if we can't handle it.
         if (!(numInst < fetchWidth) ||
@@ -633,47 +1052,57 @@ Fetch::finishTranslation(const Fault &fault, const RequestPtr &mem_req)
             assert(!finishTranslationEvent.scheduled());
             finishTranslationEvent.setFault(fault);
             finishTranslationEvent.setReq(mem_req);
+            finishTranslationEvent.setFT(ft);
             cpu->schedule(finishTranslationEvent,
                           cpu->clockEdge(Cycles(1)));
             return;
         }
-        DPRINTF(Fetch,
-                "[tid:%i] Got back req with addr %#x but expected %#x\n",
-                tid, mem_req->getVaddr(), memReq[tid]->getVaddr());
-        // Translation faulted, icache request won't be sent.
-        memReq[tid] = NULL;
-
-        // Send the fault to commit.  This thread will not do anything
-        // until commit handles the fault.  The only other way it can
-        // wake up is if a squash comes along and changes the PC.
-        const PCStateBase &fetch_pc = *pc[tid];
-
-        DPRINTF(Fetch, "[tid:%i] Translation faulted, building noop.\n", tid);
-        // We will use a nop in order to carry the fault.
-        DynInstPtr instruction = buildInst(tid, nopStaticInstPtr, nullptr,
-                fetch_pc, fetch_pc, false);
-        instruction->setNotAnInst();
-
-        instruction->setPredTarg(fetch_pc);
-        instruction->fault = fault;
-        wroteToTimeBuffer = true;
-
-        DPRINTF(Activity, "Activity this cycle.\n");
-        cpu->activityThisCycle();
-
-        fetchStatus[tid] = TrapPending;
-
-        DPRINTF(Fetch, "[tid:%i] Blocked, need to handle the trap.\n", tid);
-        DPRINTF(Fetch, "[tid:%i] fault (%s) detected @ PC %s.\n",
-                tid, fault->name(), *pc[tid]);
+        processTrap(tid, fault, mem_req);
     }
     _status = updateFetchStatus();
 }
 
 
 void
-Fetch::squashFromDecode(const PCStateBase &new_pc, const DynInstPtr squashInst,
-        const InstSeqNum seq_num, ThreadID tid)
+Fetch::processTrap(const ThreadID tid, const Fault &fault,
+                   const RequestPtr &mem_req)
+{
+    DPRINTF(Fetch,
+            "[tid:%i] Got back req with addr %#x but expected %#x\n",
+            tid, mem_req->getVaddr(), mem_req->getVaddr());
+    // Translation faulted, icache request won't be sent.
+    memReq[tid] = NULL;
+
+    // Send the fault to commit.  This thread will not do anything
+    // until commit handles the fault.  The only other way it can
+    // wake up is if a squash comes along and changes the PC.
+    const PCStateBase &fetch_pc = *pc[tid];
+
+    DPRINTF(Fetch, "[tid:%i] Translation faulted, building noop.\n", tid);
+    // We will use a nop in order to carry the fault.
+    DynInstPtr instruction = buildInst(tid, nopStaticInstPtr, nullptr,
+            fetch_pc, fetch_pc, false);
+    instruction->setNotAnInst();
+
+    instruction->setPredTarg(fetch_pc);
+    instruction->fault = fault;
+    wroteToTimeBuffer = true;
+
+    DPRINTF(Activity, "Activity this cycle.\n");
+    cpu->activityThisCycle();
+
+    fetchStatus[tid] = TrapPending;
+
+    DPRINTF(Fetch, "[tid:%i] Blocked, need to handle the trap.\n", tid);
+    DPRINTF(Fetch, "[tid:%i] fault (%s) detected @ PC %s.\n",
+            tid, fault->name(), *pc[tid]);
+}
+
+
+void
+Fetch::squashFromDecode(const PCStateBase &new_pc,
+                        const DynInstPtr squashInst,
+                        const InstSeqNum seq_num, ThreadID tid)
 {
     DPRINTF(Fetch, "[tid:%i] Squashing from decode.\n", tid);
 
@@ -745,6 +1174,10 @@ Fetch::doSquash(const PCStateBase &new_pc, const DynInstPtr squashInst,
     // interrupts are not handled when they cannot be, though
     // some opportunities to handle interrupts may be missed.
     delayedCommit[tid] = true;
+
+    // Drop all prefetches
+    fetchStats.pfSquashed += outstandingPrefetches;
+    outstandingPrefetches = 0;
 
     ++fetchStats.squashCycles;
 }
@@ -866,6 +1299,13 @@ Fetch::tick()
     for (ThreadID i = 0; i < numThreads; ++i) {
         if (issuePipelinedIfetch[i]) {
             pipelineIcacheAccesses(i);
+        }
+    }
+
+    // Process prefetches
+    if (decoupledFrontEnd) {
+        for (ThreadID i = 0; i < numThreads; ++i) {
+            processFTQ(i);
         }
     }
 
@@ -1370,6 +1810,7 @@ Fetch::fetch(bool &status_change)
         fetchStatus[tid] != IcacheWaitResponse &&
         fetchStatus[tid] != ItlbWait &&
         fetchStatus[tid] != FTQEmpty &&
+        ftq->isHeadReady(tid) &&
         fetchStatus[tid] != IcacheWaitRetry &&
         fetchStatus[tid] != QuiescePending &&
         !curMacroop;

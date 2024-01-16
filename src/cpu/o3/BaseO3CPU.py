@@ -212,3 +212,7 @@ class BaseO3CPU(BaseCPU):
         "of the instruction minimum search width per cycle",
     )
     decoupledFrontEnd = Param.Bool(False, "Enables the decoupled front-end")
+
+    maxOutstandingPrefetches = Param.Unsigned(
+        2, "Maximum outstanding prefetches. (Used for decoupled front-end)"
+    )

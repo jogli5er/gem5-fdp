@@ -51,22 +51,38 @@ namespace o3
 
 
 /** Fetch Target Methods -------------------------------- */
-FetchTarget::FetchTarget(const PCStateBase &_start_pc, InstSeqNum _seqNum)
-    : ftSeqNum(_seqNum),
-      is_branch(false), taken(false),
-      bpu_history(nullptr)
+FetchTarget::FetchTarget(const FTQ& parent, const PCStateBase &_start_pc,
+                         InstSeqNum _seqNum)
+  : ftq(parent),
+    ftSeqNum(_seqNum),
+    is_branch(false), taken(false),
+    paddr(MaxAddr),
+    translation_done(false),
+    paddr_valid(false),
+    bpu_history(nullptr),
+    state(Initial)
 {
     set(startPC , _start_pc);
+    vaddr = startPC->instAddr() & ~(ftq.cacheBlkSize-1);
 }
 
+FetchTarget::~FetchTarget()
+{
+    assert(bpu_history == nullptr);
+    req = nullptr;
+    fault = nullptr;
+}
 
 void
-FetchTarget::finalize(const PCStateBase &exit_pc, InstSeqNum sn,
+FetchTarget::finalize(const PCStateBase &exit_pc, const Addr end_addr,
+                      InstSeqNum sn,
                       bool _is_branch, bool pred_taken,
                       const PCStateBase &pred_pc)
 {
+    assert((exit_pc.instAddr() & ~(ftq.cacheBlkSize-1)) == vaddr);
     set(endPC, exit_pc);
     set(predPC, pred_pc);
+    endAddr = end_addr;
     taken = pred_taken;
     is_branch = _is_branch;
 }
@@ -77,8 +93,10 @@ FetchTarget::print()
 {
     std::stringstream ss;
     ss << "FT[" << ftSeqNum << "]: [0x" << std::hex
-        << startPC->instAddr() << "->0x" << endPC->instAddr()
+        << startPC->instAddr() << "->0x" << endAddr
         << "|B:" << is_branch
+        << "|T:" << taken
+        << "|S:" << state
         << "]";
     return ss.str();
 }
@@ -88,6 +106,7 @@ FetchTarget::print()
 
 FTQ::FTQ(CPU *_cpu, const BaseO3CPUParams &params)
     : cpu(_cpu),
+      cacheBlkSize(cpu->cacheLineSize()),
       numThreads(params.numThreads),
       numEntries(params.numFTQEntries),
       stats(_cpu, this)
@@ -200,6 +219,25 @@ FTQ::forAllBackward(ThreadID tid, std::function<void(FetchTargetPtr&)> f)
     }
 }
 
+FetchTargetPtr
+FTQ::findNext(ThreadID tid, std::function<bool(FetchTargetPtr&)> f)
+{
+    for (auto it = ftq[tid].begin(); it != ftq[tid].end(); it++) {
+        if (f(*it)) return *it;
+    }
+    return nullptr;
+}
+
+FetchTargetPtr
+FTQ::findAfterHead(ThreadID tid, std::function<bool(FetchTargetPtr&)> f)
+{
+    auto it = ftq[tid].begin();
+    if (it == ftq[tid].end()) return nullptr;
+    for (it++; it != ftq[tid].end(); it++) {
+        if (f(*it)) return *it;
+    }
+    return nullptr;
+}
 
 
 void
@@ -239,7 +277,7 @@ FTQ::squashSanityCheck(ThreadID tid)
 bool
 FTQ::isHeadReady(ThreadID tid)
 {
-    return (ftqStatus[tid] != Invalid) && (ftq[tid].size() > 0);
+    return (ftqStatus[tid] != Invalid) && (ftq[tid].size() > 1);
 }
 
 
@@ -250,6 +288,15 @@ FTQ::readHead(ThreadID tid)
     if (ftq[tid].empty()) return nullptr;
 
     return ftq[tid].front();
+}
+
+FetchTargetPtr
+FTQ::readNextHead(ThreadID tid)
+{
+    if (ftqStatus[tid] == Invalid) return nullptr;
+    if (ftq[tid].size() < 2) return nullptr;
+
+    return *(++ftq[tid].begin());
 }
 
 
@@ -282,6 +329,17 @@ FTQ::updateHead(ThreadID tid)
     return ret_val;
 }
 
+bool
+FTQ::finishTranslation(ThreadID tid, const Fault &fault, RequestPtr &req)
+{
+    for (auto it = ftq[tid].begin(); it != ftq[tid].end(); it++) {
+        if ((*it)->req == req) {
+            (*it)->fault = fault;
+            return true;
+        }
+    }
+    return false;
+}
 
 
 void
