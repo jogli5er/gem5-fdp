@@ -122,7 +122,7 @@ command = (
     + "m5 exit;"
 )
 
-workload = Workload("x86-ubuntu-24.04-img")
+workload = Workload("x86-ubuntu-24.04-boot-with-systemd")
 workload.set_parameter("readfile_contents", command)
 board.set_workload(workload)
 
