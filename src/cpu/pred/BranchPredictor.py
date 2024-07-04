@@ -37,9 +37,62 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from m5.SimObject import *
+from m5.objects.ClockedObject import ClockedObject
 from m5.params import *
 from m5.proxy import *
+from m5.SimObject import *
+
+
+class BranchType(Enum):
+    vals = [
+        "NoBranch",
+        "Return",
+        "CallDirect",
+        "CallIndirect",  # 'Call',
+        "DirectCond",
+        "DirectUncond",  # 'Direct',
+        "IndirectCond",
+        "IndirectUncond",  #'Indirect',
+    ]
+
+
+class TargetProvider(Enum):
+    vals = [
+        "NoTarget",
+        "BTB",
+        "RAS",
+        "Indirect",
+    ]
+
+
+class ReturnAddrStack(SimObject):
+    type = "ReturnAddrStack"
+    cxx_class = "gem5::branch_prediction::ReturnAddrStack"
+    cxx_header = "cpu/pred/ras.hh"
+
+    numThreads = Param.Unsigned(Parent.numThreads, "Number of threads")
+    numEntries = Param.Unsigned(16, "Number of RAS entries")
+
+
+class BranchTargetBuffer(ClockedObject):
+    type = "BranchTargetBuffer"
+    cxx_class = "gem5::branch_prediction::BranchTargetBuffer"
+    cxx_header = "cpu/pred/btb.hh"
+    abstract = True
+
+    numThreads = Param.Unsigned(Parent.numThreads, "Number of threads")
+
+
+class SimpleBTB(BranchTargetBuffer):
+    type = "SimpleBTB"
+    cxx_class = "gem5::branch_prediction::SimpleBTB"
+    cxx_header = "cpu/pred/simple_btb.hh"
+
+    numEntries = Param.Unsigned(4096, "Number of BTB entries")
+    tagBits = Param.Unsigned(16, "Size of the BTB tags, in bits")
+    instShiftAmt = Param.Unsigned(
+        Parent.instShiftAmt, "Number of bits to shift instructions by"
+    )
 
 from m5.objects.ClockedObject import ClockedObject
 from m5.objects.IndexingPolicies import *
@@ -162,10 +215,11 @@ class SimpleIndirectPredictor(IndirectPredictor):
         3, "Previous indirect targets to use for path history"
     )
     speculativePathLength = Param.Unsigned(
-        3,
+        256,
         "Additional buffer space to store speculative path history. "
         "If there are more speculative branches in flight the history cannot "
-        "be recoverd.",
+        "be recovered. Set this to an appropriate value respective the CPU"
+        "pipeline depth or a high value e.g. 256 to make it 'unlimited'.",
     )
     indirectGHRBits = Param.Unsigned(13, "Indirect GHR number of bits")
     instShiftAmt = Param.Unsigned(2, "Number of bits to shift instructions by")
@@ -181,14 +235,18 @@ class BranchPredictor(SimObject):
     instShiftAmt = Param.Unsigned(2, "Number of bits to shift instructions by")
     requiresBTBHit = Param.Bool(
         False,
-        "Requires a BTB hit to detect if "
-        " a branch was a return or indirect branch.",
+        "Requires the BTB to hit for returns and indirect branches. For an"
+        "advanced front-end there is no other way than a BTB hit to know "
+        "that the branch exists in the first place. Furthermore, the BPU "
+        "needs to know the branch type to make the correct RAS operations. "
+        "This info is only available from the BTB. "
+        "Low-end CPUs predecoding might be used to identify branches. ",
     )
 
     RASSize = Param.Unsigned(16, "RAS size")
 
-    BTB = Param.BranchTargetBuffer(SimpleBTB(), "Branch target buffer (BTB)")
-    RAS = Param.ReturnAddrStack(
+    btb = Param.BranchTargetBuffer(SimpleBTB(), "Branch target buffer (BTB)")
+    ras = Param.ReturnAddrStack(
         ReturnAddrStack(), "Return address stack, set to NULL to disable RAS."
     )
     indirectBranchPred = Param.IndirectPredictor(

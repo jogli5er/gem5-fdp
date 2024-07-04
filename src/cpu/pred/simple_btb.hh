@@ -49,79 +49,86 @@
 namespace gem5
 {
 
-namespace branch_prediction
-{
-
-class SimpleBTB : public BranchTargetBuffer
-{
-  public:
-    SimpleBTB(const SimpleBTBParams &params);
-
-    void memInvalidate() override;
-    const PCStateBase *lookup(ThreadID tid, Addr instPC,
-                           BranchType type = BranchType::NoBranch) override;
-    bool valid(ThreadID tid, Addr instPC,
-                           BranchType type = BranchType::NoBranch) override;
-    void update(ThreadID tid, Addr instPC, const PCStateBase &target_pc,
-                           BranchType type = BranchType::NoBranch,
-                           StaticInstPtr inst = nullptr) override;
-
-
-  private:
-    struct BTBEntry
+    namespace branch_prediction
     {
-        /** The entry's tag. */
-        Addr tag = 0;
 
-        /** The entry's target. */
-        std::unique_ptr<PCStateBase> target;
+        class SimpleBTB : public BranchTargetBuffer
+        {
+        public:
+            SimpleBTB(const SimpleBTBParams &params);
 
-        /** The entry's thread id. */
-        ThreadID tid;
+            void memInvalidate() override;
+            bool valid(ThreadID tid, Addr instPC) override;
+            const PCStateBase *lookup(ThreadID tid, Addr instPC,
+                                      BranchType type = BranchType::NoBranch) override;
+            void update(ThreadID tid, Addr instPC, const PCStateBase &target_pc,
+                        BranchType type = BranchType::NoBranch,
+                        StaticInstPtr inst = nullptr) override;
+            const StaticInstPtr getInst(ThreadID tid, Addr instPC) override;
 
-        /** Whether or not the entry is valid. */
-        bool valid = false;
-    };
+        private:
+            struct BTBEntry
+            {
+                /** The entry's tag. */
+                Addr tag = 0;
 
+                /** The entry's target. */
+                std::unique_ptr<PCStateBase> target;
 
-    /** Returns the index into the BTB, based on the branch's PC.
-     *  @param inst_PC The branch to look up.
-     *  @return Returns the index into the BTB.
-     */
-    inline unsigned getIndex(Addr instPC, ThreadID tid);
+                /** The entry's thread id. */
+                ThreadID tid;
 
-    /** Returns the tag bits of a given address.
-     *  @param inst_PC The branch's address.
-     *  @return Returns the tag bits.
-     */
-    inline Addr getTag(Addr instPC);
+                /** Whether or not the entry is valid. */
+                bool valid = false;
 
-    /** The actual BTB. */
-    std::vector<BTBEntry> btb;
+                /** Pointer to the static branch instruction at this address */
+                StaticInstPtr inst = nullptr;
+            };
 
-    /** The number of entries in the BTB. */
-    unsigned numEntries;
+            /** Returns the index into the BTB, based on the branch's PC.
+             *  @param inst_PC The branch to look up.
+             *  @return Returns the index into the BTB.
+             */
+            inline unsigned getIndex(Addr instPC, ThreadID tid);
 
-    /** The index mask. */
-    unsigned idxMask;
+            /** Returns the tag bits of a given address.
+             *  @param inst_PC The branch's address.
+             *  @return Returns the tag bits.
+             */
+            inline Addr getTag(Addr instPC);
 
-    /** The number of tag bits per entry. */
-    unsigned tagBits;
+            /** Internal call to find an address in the BTB
+             * @param instPC The branch's address.
+             * @return Returns a pointer to the BTB entry if found, nullptr otherwise.
+             */
+            BTBEntry *findEntry(Addr instPC, ThreadID tid);
 
-    /** The tag mask. */
-    unsigned tagMask;
+            /** The actual BTB. */
+            std::vector<BTBEntry> btb;
 
-    /** Number of bits to shift PC when calculating index. */
-    unsigned instShiftAmt;
+            /** The number of entries in the BTB. */
+            unsigned numEntries;
 
-    /** Number of bits to shift PC when calculating tag. */
-    unsigned tagShiftAmt;
+            /** The index mask. */
+            unsigned idxMask;
 
-    /** Log2 NumThreads used for hashing threadid */
-    unsigned log2NumThreads;
-};
+            /** The number of tag bits per entry. */
+            unsigned tagBits;
 
-} // namespace branch_prediction
+            /** The tag mask. */
+            unsigned tagMask;
+
+            /** Number of bits to shift PC when calculating index. */
+            unsigned instShiftAmt;
+
+            /** Number of bits to shift PC when calculating tag. */
+            unsigned tagShiftAmt;
+
+            /** Log2 NumThreads used for hashing threadid */
+            unsigned log2NumThreads;
+        };
+
+    } // namespace branch_prediction
 } // namespace gem5
 
 #endif // __CPU_PRED_SIMPLE_BTB_HH__

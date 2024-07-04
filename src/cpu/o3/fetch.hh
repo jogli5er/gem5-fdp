@@ -481,7 +481,7 @@ class Fetch
     ThreadID retryTid;
 
     /** Cache block size. */
-    unsigned int cacheBlkSize;
+    Addr cacheBlkSize;
 
     /** The size of the fetch buffer in bytes. The fetch buffer
      *  itself may be smaller than a cache line.

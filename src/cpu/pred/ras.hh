@@ -54,160 +54,156 @@
 namespace gem5
 {
 
-namespace branch_prediction
-{
+  namespace branch_prediction
+  {
 
-/** Return address stack class, implements a simple RAS. */
-class ReturnAddrStack : public SimObject
-{
-  public:
-
-    /** Subclass that implements the actual address stack. ******
-     */
-    class AddrStack
+    /** Return address stack class, implements a simple RAS. */
+    class ReturnAddrStack : public SimObject
     {
+    public:
+      /** Subclass that implements the actual address stack. ******
+       */
+      class AddrStack
+      {
       public:
         AddrStack(ReturnAddrStack &_parent)
-          : parent(_parent)
-        {}
+            : parent(_parent)
+        {
+        }
 
+        /** Initializes RAS with a specified number of entries.
+         *  @param numEntries Number of entries in the RAS.
+         */
+        void init(unsigned numEntries);
 
-      /** Initializes RAS with a specified number of entries.
-       *  @param numEntries Number of entries in the RAS.
-       */
-      void init(unsigned numEntries);
+        void reset();
 
-      void reset();
+        /** Returns the top address on the RAS. */
+        const PCStateBase *top();
 
-      /** Returns the top address on the RAS. */
-      const PCStateBase *top();
+        /** Returns the index of the top of the RAS. */
+        unsigned topIdx() { return tos; }
 
-      /** Returns the index of the top of the RAS. */
-      unsigned topIdx() { return tos; }
+        /** Pushes an address onto the RAS. */
+        void push(const PCStateBase &return_addr);
 
-      /** Pushes an address onto the RAS. */
-      void push(const PCStateBase &return_addr);
+        /** Pops the top address from the RAS.
+         * @return false if the entry was corrupted, true otherwise.
+         *  */
+        bool pop();
 
-      /** Pops the top address from the RAS.
-       * @return false if the entry was corrupted, true otherwise.
-       *  */
-      bool pop();
+        /** Changes index to the top of the RAS, and replaces the top address
+         *  with a new target.
+         *  @param tos, cdtos the indices saved at the time of the prediction.
+         *  @param restored The new target address of the new top of the RAS.
+         */
+        void restore(unsigned tos, unsigned cdTos, const PCStateBase *restored);
 
-      /** Changes index to the top of the RAS, and replaces the top address
-       *  with a new target.
-       *  @param tos, cdtos the indices saved at the time of the prediction.
-       *  @param restored The new target address of the new top of the RAS.
-       */
-      void restore(unsigned tos, unsigned cdTos, const PCStateBase *restored);
+        bool empty() { return usedEntries == 0; }
 
-      bool empty() { return usedEntries == 0; }
+        bool full() { return usedEntries >= numEntries; }
 
-      bool full() { return usedEntries >= numEntries; }
+        /** Returns the top n entries of the stack as string. For debugging. */
+        std::string toString(int n);
 
-      /** print the n top entries of the stack */
-      std::string print(int n);
-
-      /** Increments the top of stack index. */
-      inline void
-      incrTos()
-      {
+        /** Increments the top of stack index. */
+        inline void
+        incrTos()
+        {
           if (++tos == numEntries)
-              tos = 0;
-      }
+            tos = 0;
+        }
 
-      /** Decrements the top of stack index. */
-      inline void
-      decrTos()
-      {
+        /** Decrements the top of stack index. */
+        inline void
+        decrTos()
+        {
           tos = (tos == 0 ? numEntries - 1 : tos - 1);
-      }
+        }
 
-      inline void
-      incrCdTos()
-      {
+        inline void
+        incrCdTos()
+        {
           if (++cdTos == numEntries)
-              cdTos = 0;
+            cdTos = 0;
           firstWrap = true;
-      }
+        }
 
-      /** Decrements the top of stack index. */
-      inline void
-      decrCdTos()
-      {
+        /** Decrements the top of stack index. */
+        inline void
+        decrCdTos()
+        {
           cdTos = (cdTos == 0 ? numEntries - 1 : cdTos - 1);
           firstWrap = false;
-      }
+        }
 
-      /** The Stack itself. */
-      std::vector<std::unique_ptr<PCStateBase>> addrStack;
+        /** The Stack itself. */
+        std::vector<std::unique_ptr<PCStateBase>> addrStack;
 
-      /** The number of entries in the RAS. */
-      unsigned numEntries;
+        /** The number of entries in the RAS. */
+        unsigned numEntries;
 
-      /** The number of used entries in the RAS. */
-      unsigned usedEntries;
+        /** The number of used entries in the RAS. */
+        unsigned usedEntries;
 
-      /** The top of stack index. */
-      unsigned tos;
+        /** The top of stack index. */
+        unsigned tos;
 
-      /** Additions to detect stack corruption.
-       *  - A secondary pointer to detect wrap arounds
-       *  - A flag to record the first meat of the pointers
-       * */
-      unsigned cdTos;
-      bool firstWrap;
+        /** Additions to detect stack corruption.
+         *  - A secondary pointer to detect wrap arounds
+         *  - A flag to record the first meat of the pointers
+         * */
+        unsigned cdTos;
+        bool firstWrap;
 
       protected:
         ReturnAddrStack &parent;
-    };
+      };
 
+    public:
+      // typedef RASParams Params;
+      typedef ReturnAddrStackParams Params;
 
+      // ReturnAddrStack(BPredUnit &_parent, const RASParams);
+      ReturnAddrStack(const Params &p);
 
-  public:
-    // typedef RASParams Params;
-    typedef ReturnAddrStackParams Params;
+      void reset();
 
-    // ReturnAddrStack(BPredUnit &_parent, const RASParams);
-    ReturnAddrStack(const Params &p);
+      /**
+       * Pushes an address onto the RAS.
+       * @param PC The current PC (should be a call).
+       * @param ras_history Pointer that will be set to an object that
+       * has the return address state associated when the address was pushed.
+       */
+      void push(ThreadID tid, const PCStateBase &pc, void *&ras_history);
 
-    void reset();
+      /**
+       * Pops the top address from the RAS.
+       * @param ras_history Pointer that will be set to an object that
+       * has the return address state associated when an address was poped.
+       * @return The address that got poped from the stack.
+       *  */
+      const PCStateBase *pop(ThreadID tid, void *&ras_history);
 
-    /**
-     * Pushes an address onto the RAS.
-     * @param PC The current PC (should be a call).
-     * @param ras_history Pointer that will be set to an object that
-     * has the return address state associated when the address was pushed.
-     */
-    void push(ThreadID tid, const PCStateBase &pc, void * &ras_history);
+      /**
+       * The branch (call/return) got squashed.
+       * Restores the state of the RAS and delete history
+       *  @param res_history The pointer to the history object.
+       */
+      void squash(ThreadID tid, void *&ras_history);
 
-    /**
-     * Pops the top address from the RAS.
-     * @param ras_history Pointer that will be set to an object that
-     * has the return address state associated when an address was poped.
-     * @return The address that got poped from the stack.
-     *  */
-    const PCStateBase* pop(ThreadID tid, void * &ras_history);
+      /**
+       * A branch got finally got finally commited.
+       * @param misp Whether the branch was mispredicted.
+       * @param brType The type of the branch.
+       * @param ras_history The pointer to the history object.
+       */
+      void commit(ThreadID tid, bool misp,
+                  const BranchType brType, void *&ras_history);
 
-    /**
-     * The branch (call/return) got squashed.
-     * Restores the state of the RAS and delete history
-     *  @param res_history The pointer to the history object.
-     */
-    void squash(ThreadID tid, void * &ras_history);
-
-    /**
-     * A branch got finally got finally commited.
-     * @param misp Whether the branch was mispredicted.
-     * @param brType The type of the branch.
-     * @param ras_history The pointer to the history object.
-     */
-    void commit(ThreadID tid, bool misp,
-                const BranchType brType, void * &ras_history);
-
-  private:
-
-    class RASHistory
-    {
+    private:
+      class RASHistory
+      {
       public:
         /* Was the RAS pushed or poped for this branch. */
         bool pushed = false;
@@ -222,22 +218,22 @@ class ReturnAddrStack : public SimObject
         /** The RAS corruption detection pointer of the instruction */
         unsigned cdTos = 0;
         bool corrupted = false;
-    };
+      };
 
-    /** The RAS itself. */
-    std::vector<AddrStack> addrStacks;
+      /** The RAS itself. */
+      std::vector<AddrStack> addrStacks;
 
-    /** The number of entries in the RAS. */
-    unsigned numEntries;
-    /** The number of threads */
-    unsigned numThreads;
-    /** Fallback to BTB in case a stack corruption was detected. */
-    unsigned useBtbFallback;
-    /** Enable restoring of RAS entires. */
-    unsigned restore;
+      /** The number of entries in the RAS. */
+      unsigned numEntries;
+      /** The number of threads */
+      unsigned numThreads;
+      /** Fallback to BTB in case a stack corruption was detected. */
+      unsigned useBtbFallback;
+      /** Enable restoring of RAS entires. */
+      unsigned restore;
 
-    struct ReturnAddrStackStats : public statistics::Group
-    {
+      struct ReturnAddrStackStats : public statistics::Group
+      {
         ReturnAddrStackStats(statistics::Group *parent);
         statistics::Scalar pushes;
         statistics::Scalar pops;
@@ -246,10 +242,11 @@ class ReturnAddrStack : public SimObject
         statistics::Scalar used;
         statistics::Scalar correct;
         statistics::Scalar wrong;
-    } stats;
-};
+        statistics::Scalar incorrect;
+      } stats;
+    };
 
-} // namespace branch_prediction
+  } // namespace branch_prediction
 } // namespace gem5
 
 #endif // __CPU_PRED_RAS_HH__
